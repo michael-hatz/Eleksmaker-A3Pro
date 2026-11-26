@@ -1,1 +1,4 @@
 pyserial>=3.4
+numpy
+PyQt6
+scipy  # optional: schnellere Pfad-Sortierung bei sehr vielen Pfaden

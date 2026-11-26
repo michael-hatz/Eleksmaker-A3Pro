@@ -7,7 +7,8 @@ Dieses Repo dokumentiert, was an einem realen Gerät funktioniert hat:
 - [wo der Servo angeschlossen wird](#1-servo-anschließen),
 - [warum die Original-Firmware den Servo zittern lässt und welche Firmware das behebt](#2-firmware-warum-die-original-firmware-nicht-reicht),
 - [wie man den Stift per G-Code ansteuert](#4-stift-ansteuern),
-- [Python-Testprogramme](#5-die-python-programme) für Servo, Achsen und GRBL-Einstellungen.
+- [Python-Testprogramme](#5-die-python-programme) für Servo, Achsen und GRBL-Einstellungen,
+- [A3 Plot](#6-a3-plot-svg-dateien-plotten), ein Programm mit Oberfläche zum Plotten von SVG-Dateien.
 
 > Getestet mit: EleksMaker A3 Pro, Controller **EleksMana SE v3.2** (Arduino Nano/ATmega328P, USB-Seriell-Wandler CH340), SG90-Servo, Ubuntu-Linux, Python 3.
 
@@ -20,9 +21,10 @@ Dieses Repo dokumentiert, was an einem realen Gerät funktioniert hat:
 3. [Firmware flashen (grbl-servo)](#3-firmware-flashen-grbl-servo)
 4. [Stift ansteuern](#4-stift-ansteuern)
 5. [Die Python-Programme](#5-die-python-programme)
-6. [GRBL-Einstellungen des A3 Pro](#6-grbl-einstellungen-des-a3-pro)
-7. [Fehlersuche](#7-fehlersuche)
-8. [Quellen & Lizenz](#8-quellen--lizenz)
+6. [A3 Plot: SVG-Dateien plotten](#6-a3-plot-svg-dateien-plotten)
+7. [GRBL-Einstellungen des A3 Pro](#7-grbl-einstellungen-des-a3-pro)
+8. [Fehlersuche](#8-fehlersuche)
+9. [Quellen & Lizenz](#9-quellen--lizenz)
 
 ---
 
@@ -181,7 +183,7 @@ Hinweise:
 
 ## 5. Die Python-Programme
 
-Benötigt wird nur `pyserial` (`pip install -r requirements.txt` oder `sudo apt install python3-serial`). Alle Programme nehmen `/dev/ttyUSB0` als Standard-Port.
+Die Testprogramme in diesem Abschnitt brauchen nur `pyserial` (`sudo apt install python3-serial`). Alle Programme nehmen `/dev/ttyUSB0` als Standard-Port.
 
 ### `pen_calibrate.py`: Stift-Werte finden
 
@@ -230,7 +232,65 @@ Beim Öffnen des Ports startet der Nano normalerweise neu und meldet sich mit `G
 
 ---
 
-## 6. GRBL-Einstellungen des A3 Pro
+## 6. A3 Plot: SVG-Dateien plotten
+
+`a3plot_gui.py` ist ein Programm mit Oberfläche (Qt) zum Plotten von SVG-Dateien. Man legt die Zeichnung auf einem A4-Blatt zurecht, stellt die Geschwindigkeit ein und verfolgt den Plot: Wie lange dauert er voraussichtlich, wie lange läuft er schon, wie lange dauert er noch, wann ist er fertig?
+
+### Installation (Ubuntu)
+
+```bash
+sudo apt install python3-pyqt6 python3-numpy python3-scipy python3-serial
+python3 a3plot_gui.py                # oder: python3 a3plot_gui.py zeichnung.svg
+./install_desktop.sh                 # optional: Starter „A3 Plot“ im Anwendungsmenü
+```
+
+### Ablauf
+
+1. **SVG öffnen.** Unterstützt werden Pfade (mit allen Kurven und Bögen), Linien, Rechtecke, Kreise, Ellipsen, Polygone, Gruppen mit Transformationen und Inkscape-Ebenen. Jede Ebene lässt sich einzeln an- und abwählen, zum Beispiel für mehrere Stiftfarben nacheinander. Die Position bleibt dabei gleich. Text muss vorher in Inkscape in Pfade umgewandelt werden.
+2. **Positionieren.** Die Zeichnung mit der Maus auf dem Blatt verschieben und an den Ecken größer oder kleiner ziehen. Das Seitenverhältnis bleibt dabei erhalten. Mit gedrückter Umschalttaste wird nicht auf 0,5 mm gerundet. Alternativ X/Y, Breite/Höhe oder Prozent eintippen. *Einpassen* füllt das Blatt bis zum Rand, *↻ 90°* dreht die Zeichnung. Mausrad = Zoom, rechte Maustaste = Ansicht verschieben, Doppelklick = ganzes Blatt.
+3. **Stift einstellen.** Zeichengeschwindigkeit, Leerfahrt-Geschwindigkeit, Servo-Werte oben/unten und Wartezeiten nach dem Absenken und Anheben. Die geschätzte Dauer wird sofort neu berechnet.
+4. **Verbinden** und den Stift über die Blattecke am Nullpunkt bringen (roter Punkt in der Ansicht, Standard: unten links). Am einfachsten vor dem Verbinden von Hand hinschieben, denn beim Verbinden startet der Controller neu und die aktuelle Position wird zu 0/0. Oder mit den Pfeiltasten hinfahren und **Papierecke = hier** drücken. Das Blatt muss nicht gerade liegen: Danach zur benachbarten Ecke an der **kurzen** Blattseite fahren (bei A3 hoch mit Nullpunkt unten links also unten rechts; **Zur 2. Ecke** fährt ungefähr hin, den Rest mit den Pfeiltasten) und **2. Ecke = hier** drücken. A3 Plot berechnet daraus die Schräglage und dreht den G-Code passend, die Drehung steht unter den Maschinen-Knöpfen. Wer die erste Ecke neu setzt, muss auch die zweite neu setzen. Weicht der gemessene Abstand mehr als 5 mm von der Seitenlänge ab oder ist das Blatt um mehr als 20° gedreht, fragt A3 Plot nach. **Rahmen abfahren** zeigt mit gehobenem Stift, wo die Zeichnung landet.
+5. **Plot starten.** Rechts unten stehen geschätzte Gesamtdauer, vergangene Zeit, verbleibende Zeit und die voraussichtliche Uhrzeit des Endes. Die verbleibende Zeit wird nach der ersten Minute an das tatsächliche Tempo angepasst. Bereits gezeichnete Linien werden in der Ansicht dunkelblau, die aktuelle Stiftposition ist rot markiert. Nach dem Plot steht die tatsächliche Dauer neben der Schätzung. Jeder Plot wird in `~/.local/share/a3plot/history.csv` protokolliert.
+
+| Knopf | Wirkung |
+|---|---|
+| **Pause** | hält nach dem aktuellen Strich an, **Stift oben**. Danach kann man z. B. den Stift tauschen. |
+| **Sofort halt** | GRBL-Feed-Hold: bremst sofort, der Stift bleibt aber unten (gibt einen Punkt) |
+| **Weiter** | setzt nach Pause oder Halt fort |
+| **Abbrechen** | hält an, setzt GRBL zurück (Position bleibt erhalten) und hebt den Stift |
+
+### Richtung der Achsen prüfen
+
+Beim ersten Mal unter *Einstellungen → Maschine und Übertragung* prüfen, ob die Annahmen stimmen: Nullpunkt unten links, +X nach rechts, +Y nach hinten. Mit den Pfeiltasten unter „Maschine“ testen: Der Stift muss in Pfeilrichtung fahren (↑ = vom Betrachter weg). Fährt er falsch herum, die Richtung in den Einstellungen umstellen.
+
+### Keine verschluckten Befehle mehr
+
+GRBL hat einen Empfangspuffer von 128 Byte. Schickt das Programm mehr unbestätigte Zeichen, als hineinpassen, gehen Bytes **ohne Fehlermeldung** verloren. Das ist die übliche Ursache für „verschluckte“ Befehle. A3 Plot schützt sich mehrfach dagegen:
+
+- **Übertragung „Sicher“ (Standard):** Es ist immer nur **eine** Zeile unterwegs. Die nächste geht erst raus, wenn GRBL `ok` gemeldet hat. Der Puffer kann so nie überlaufen. Der Bewegungsplaner von GRBL (18 Blöcke) bleibt trotzdem gefüllt, weil `ok` sofort kommt, solange darin Platz ist.
+- Alternativ **Zeichen zählen** mit einstellbarer Obergrenze (Standard 64 von 127 Byte, also reichlich Reserve).
+- Nach dem Verbinden wartet das Programm, bis sich GRBL nach dem Neustart meldet. Erst dann geht der erste Befehl raus.
+- Lehnt GRBL eine Zeile mit `error` ab (z. B. weil sie verstümmelt ankam), wird sie im sicheren Modus **automatisch erneut gesendet**. Alle Koordinaten sind absolut (`G90`), deshalb ist das Wiederholen harmlos.
+- **Watchdog:** Steht die Maschine still, obwohl eine Zeile seit Sekunden unbestätigt ist, gilt die Zeile als verloren und wird erneut gesendet.
+- Startet der Controller mitten im Plot neu (z. B. bei einem Spannungseinbruch), bricht das Programm ab, statt blind weiterzusenden.
+
+Wie viele Zeilen wiederholt wurden, steht unter „Zeilen“ und im Protokoll.
+
+### Tipp: Motoren zwischen den Bewegungen bestromt lassen
+
+Mit `$1=25` schaltet GRBL die Motoren 25 ms nach jeder Bewegung ab. Beim Stiftwechsel (`M3`) steht die Maschine kurz still und könnte sich dabei minimal verschieben. Mit `$1=255` bleiben die Motoren dauerhaft bestromt (im Protokollfeld eingeben). Die Motoren werden dann etwas wärmer, und der Schlitten lässt sich nicht mehr von Hand schieben.
+
+### Tests
+
+```bash
+python3 -m pytest tests
+```
+
+Die Tests laufen gegen einen simulierten GRBL-Controller (`tests/fake_grbl.py`) mit 128-Byte-Empfangspuffer. Geprüft wird unter anderem, dass der Puffer nie überläuft, dass jede Zeile genau einmal und in der richtigen Reihenfolge ausgeführt wird und dass fehlerhafte Zeilen und verlorene `ok` erkannt werden.
+
+---
+
+## 7. GRBL-Einstellungen des A3 Pro
 
 Die Werte unseres Geräts, wie sie ab Werk eingestellt waren, stehen in [grbl_settings_a3pro.txt](grbl_settings_a3pro.txt). Die wichtigsten:
 
@@ -245,7 +305,7 @@ Die Werte unseres Geräts, wie sie ab Werk eingestellt waren, stehen in [grbl_se
 
 ---
 
-## 7. Fehlersuche
+## 8. Fehlersuche
 
 | Symptom | Ursache / Lösung |
 |---|---|
@@ -255,11 +315,12 @@ Die Werte unseres Geräts, wie sie ab Werk eingestellt waren, stehen in [grbl_se
 | Achsen fahren nach dem Flashen dreimal zu weit | EEPROM wurde zurückgesetzt, Einstellungen mit `grbl_settings.py restore` zurückspielen |
 | `Permission denied: /dev/ttyUSB0` | Benutzer ist nicht in der Gruppe `dialout` |
 | avrdude: `not in sync` | anderen Bootloader-Baudwert probieren (`-b 57600` ↔ `-b 115200`). Kein anderes Programm darf den Port gerade benutzen |
+| Plot zeichnet spiegelverkehrt oder fährt in die falsche Richtung | in A3 Plot unter *Einstellungen → Maschine und Übertragung* Nullpunkt-Ecke und Achsrichtungen anpassen (siehe [Abschnitt 6](#6-a3-plot-svg-dateien-plotten)) |
 | `/dev/ttyUSB0` fehlt | `lsusb` sollte `1a86:7523 QinHeng Electronics CH340` zeigen. Ein anderes USB-Kabel probieren, manche Kabel können nur laden |
 
 ---
 
-## 8. Quellen & Lizenz
+## 9. Quellen & Lizenz
 
 **Quellen und Hintergrund**
 - [robottini/grbl-servo](https://github.com/robottini/grbl-servo): GRBL 0.9i mit RC-Servo auf D11
