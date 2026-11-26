@@ -196,8 +196,13 @@ class SheetView(QGraphicsView):
         self.marker.setVisible(visible)
 
     # ------------------------------------------------------------- Maus
+    def _content_rect(self):
+        # nicht sceneBoundingRect(): das enthält die halbe Strichbreite in Item-Einheiten
+        # und wächst deshalb mit dem Maßstab
+        return self.content.mapRectToScene(self.content.rect())
+
     def _corners(self):
-        r = self.content.sceneBoundingRect()
+        r = self._content_rect()
         return [r.topLeft(), r.topRight(), r.bottomRight(), r.bottomLeft()]
 
     def _update_handles(self):
@@ -228,7 +233,7 @@ class SheetView(QGraphicsView):
             anchor = self._corners()[(h + 2) % 4]
             self.drag = ("resize", h, anchor)
             return
-        if self.content.sceneBoundingRect().contains(sp):
+        if self._content_rect().contains(sp):
             self.drag = ("move", sp - self.content.pos())
             return
         self.pan_last = vp
@@ -269,7 +274,7 @@ class SheetView(QGraphicsView):
         h = self._hit_handle(vp)
         if h is not None:
             self.setCursor(Qt.CursorShape.SizeFDiagCursor if h in (0, 2) else Qt.CursorShape.SizeBDiagCursor)
-        elif self.has_drawing and not self.locked and self.content.sceneBoundingRect().contains(sp):
+        elif self.has_drawing and not self.locked and self._content_rect().contains(sp):
             self.setCursor(Qt.CursorShape.SizeAllCursor)
         else:
             self.setCursor(Qt.CursorShape.ArrowCursor)

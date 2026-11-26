@@ -194,6 +194,7 @@ class GrblStreamer:
             self._log("info", "Kein Banner – Controller wurde nicht neu gestartet, alter Zustand gilt weiter.")
         self._emit("connected", (self.version or "Grbl ?", banner))
         self.command("$$")
+        self.command("$#")
         return True
 
     def _wait_ok(self, timeout):
@@ -328,6 +329,8 @@ class GrblStreamer:
             self._emit("alarm", line)
             if self.job_active and not self.aborting:
                 self._fail_job(f"GRBL meldet {line}. Plot abgebrochen.")
+        elif re.match(r"\[(G5[4-9]|G28|G30|G92|TLO|PRB):", line):
+            self._offset(line)
         elif line.startswith("$") and "=" in line:
             m = re.match(r"\$(\d+)=([-\d.]+)", line)
             if m:
@@ -343,8 +346,9 @@ class GrblStreamer:
         if e.src == "cmd":
             if err:
                 self._log("error", f"{e.text} -> {err}")
-            elif e.text != "$$":
+            elif e.text not in ("$$", "$#"):
                 self._log("rx", f"{e.text} -> ok")
+            self._check_finished()
             return
         if err is None:
             self._emit("job_acked", e.idx)
@@ -373,15 +377,25 @@ class GrblStreamer:
             self.job_active = False
             self._emit("job_state", "finished")
 
+    def _offset(self, line):
+        m = re.match(r"\[(G54|G92):([-\d.]+),([-\d.]+)", line)
+        if m and (abs(float(m.group(2))) > 1e-6 or abs(float(m.group(3))) > 1e-6):
+            self._log("warn", f"{line}: Koordinaten-Versatz {m.group(1)} ist nicht null. Positionen "
+                              "und G-Code passen dann nicht zusammen – in der Konsole "
+                              + ("„G10 L2 P1 X0 Y0“" if m.group(1) == "G54" else "„G92.1“")
+                              + " senden.")
+
     def _status(self, line):
         m = STATUS_RE.match(line)
         if not m:
             return
         self.state = m.group(1)
-        if m.group(2) is not None:
-            self.mpos = (float(m.group(2)), float(m.group(3)))
-        elif m.group(5) is not None:
+        # G-Code-Koordinaten sind Werkstückkoordinaten (WPos). Meldet GRBL nur MPos
+        # ($10=1), gilt MPos = WPos – beim Verbinden wird geprüft, dass G54/G92 null sind.
+        if m.group(5) is not None:
             self.mpos = (float(m.group(5)), float(m.group(6)))
+        elif m.group(2) is not None:
+            self.mpos = (float(m.group(2)), float(m.group(3)))
         self.last_status_at = time.monotonic()
         self._emit("status", (self.state, self.mpos[0], self.mpos[1]))
 
@@ -417,9 +431,9 @@ class GrblStreamer:
                 and now - oldest.sent_at > self.idle_timeout
                 and now - self.last_rx_at < 2 * self.poll_interval + 1.0  # GRBL lebt (Status kommt)
                 ):
-            lost = list(self.inflight)
+            lost = [e for e in self.inflight if e.text not in ("$$", "$#")]
             self.inflight.clear()
-            if lost[0].text == "$$":
+            if not lost:
                 return
             self._log("warn", "Keine Bestätigung für: " + ", ".join(e.text for e in lost)
                       + " – wird erneut gesendet.")

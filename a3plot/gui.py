@@ -130,6 +130,7 @@ class MainWindow(QMainWindow):
         self.park = st.value("plot/park", "true") == "true"
         self.placement = Placement()
         self.drawing = None
+        self.label_before_load = "Keine Datei geladen"
         self.ordered = []            # pro Ebene: sortierte Pfade
         self.bounds = None           # Grenzen aller Ebenen (Dokument-mm, gedreht)
         self.job = None
@@ -469,6 +470,9 @@ class MainWindow(QMainWindow):
 
     # ============================================================ Datei
     def open_svg(self):
+        if self.plot:
+            QMessageBox.information(self, "SVG öffnen", "Während eines Plots nicht möglich.")
+            return
         start = self.settings.value("last_dir", os.path.expanduser("~"))
         fn, _ = QFileDialog.getOpenFileName(self, "SVG öffnen", start, "SVG (*.svg);;Alle Dateien (*)")
         if fn:
@@ -476,6 +480,7 @@ class MainWindow(QMainWindow):
 
     def load_file(self, fn):
         self.settings.setValue("last_dir", os.path.dirname(fn))
+        self.label_before_load = self.file_label.text()
         self.file_label.setText(f"Lade {os.path.basename(fn)} …")
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
 
@@ -495,6 +500,10 @@ class MainWindow(QMainWindow):
     def on_loaded(self, res):
         QApplication.restoreOverrideCursor()
         fn, d, ordered = res
+        if self.plot:     # Plot wurde gestartet, während die Datei noch geladen hat
+            self.file_label.setText(self.label_before_load)
+            self.statusBar().showMessage(f"{os.path.basename(fn)} nicht geöffnet: es läuft ein Plot.", 8000)
+            return
         if isinstance(d, Exception):
             self.file_label.setText("Keine Datei geladen")
             QMessageBox.critical(self, "SVG", f"Datei kann nicht gelesen werden:\n{d}")
@@ -682,6 +691,7 @@ class MainWindow(QMainWindow):
 
     def schedule_build(self):
         self.job_dirty = True
+        self.job_gen += 1   # ein noch laufender Build mit alten Werten wird verworfen
         if self.plot:
             return          # nach dem Plot wird neu berechnet
         if self.drawing:
@@ -775,9 +785,15 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self, self.setup, self.mode, self.budget, self.park)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
+        old = (self.setup.origin_corner, self.setup.x_right, self.setup.y_up)
         self.setup.origin_corner = dlg.corner.currentData()
         self.setup.x_right = dlg.xdir.currentIndex() == 0
         self.setup.y_up = dlg.ydir.currentIndex() == 0
+        if old != (self.setup.origin_corner, self.setup.x_right, self.setup.y_up):
+            if self.setup.sheet_angle:
+                self.setup.sheet_angle = 0.0
+                self.log_line("warn", "Nullpunkt-Ecke oder Achsrichtung geändert: Drehung zurückgesetzt. "
+                                      "Bitte Papierecke und 2. Ecke neu setzen.")
         self.mode = dlg.mode.currentData()
         self.budget = dlg.budget.value()
         self.park = dlg.park.isChecked()
@@ -913,6 +929,8 @@ class MainWindow(QMainWindow):
         p = self.plot
         now = time.monotonic()
         if state in ("soft_paused", "holding"):
+            if state == "soft_paused":
+                p["soft_pause"] = True    # Stift darf bewegt worden sein -> beim Weiter anheben
             if p["paused_at"] is None:
                 p["paused_at"] = now
             p["state"] = state
@@ -926,8 +944,12 @@ class MainWindow(QMainWindow):
         self.update_buttons()
 
     # ===================================================== manuelle Befehle
+    def manual_blocked(self):
+        """Während eines Plots nur in der weichen Pause – sonst landen Befehle mitten im Job."""
+        return bool(self.plot) and self.plot["state"] != "soft_paused"
+
     def manual(self, lines):
-        if not self.connected or (self.plot and self.plot["state"] == "running"):
+        if not self.connected or self.manual_blocked():
             return
         for l in lines:
             self.streamer.command(l)
@@ -939,11 +961,12 @@ class MainWindow(QMainWindow):
         if not self.connected:
             self.log_line("warn", "Nicht verbunden.")
             return
-        if self.plot and self.plot["state"] == "running":
-            self.log_line("warn", "Während des Plots gesperrt.")
-            return
         if text in ("!", "~", "?"):
             self.streamer.realtime(text.encode())
+        elif self.manual_blocked():
+            self.log_line("warn", "Während des Plots gesperrt (außer in der Pause). "
+                                  "Echtzeitbefehle ! ~ ? gehen immer.")
+            return
         else:
             self.streamer.command(text)
         self.console.clear()
@@ -1078,10 +1101,11 @@ class MainWindow(QMainWindow):
     def resume_plot(self):
         if not self.plot:
             return
-        if self.plot["state"] == "soft_paused":
+        if self.plot["state"] == "soft_paused" or self.plot.get("soft_pause"):
             self.streamer.resume(self.resume_prefix())
         else:
             self.streamer.resume([])
+        self.plot["soft_pause"] = False
 
     def abort_plot(self):
         if not self.plot:
@@ -1216,15 +1240,16 @@ class MainWindow(QMainWindow):
         if self.plot and not self.ask("Es läuft ein Plot. Wirklich beenden?\n(Der Plotter bleibt stehen.)"):
             e.ignore()
             return
-        if self.streamer:
+        s = self.streamer   # kann während processEvents() durch "disconnected" None werden
+        if s:
             if self.plot:
                 # anhalten und Reset abwarten, damit der Plotter sicher steht
-                self.streamer.abort()
+                s.abort()
                 t = time.monotonic()
-                while time.monotonic() - t < 0.3 or (self.streamer.aborting and time.monotonic() - t < 5):
+                while time.monotonic() - t < 0.3 or (s.aborting and time.monotonic() - t < 5):
                     QApplication.processEvents()
                     time.sleep(0.02)
-            self.streamer.stop()
+            s.stop()
         e.accept()
 
 

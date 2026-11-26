@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-from a3plot.grbl import GrblStreamer
+from a3plot.grbl import GrblStreamer, Inflight
 from fake_grbl import FakeGrbl
 
 
@@ -50,7 +50,7 @@ def test_all_lines_delivered_in_order_without_overflow(mode, budget):
     rec = run_job(fake, lines, mode=mode, budget=budget)
     assert rec.states()[-1] == "finished"
     assert fake.overflow == 0
-    job_received = [l for l in fake.received if l != "$$"]
+    job_received = [l for l in fake.received if l not in ("$$", "$#")]
     assert job_received == lines
     assert fake.executed == lines
 
@@ -139,7 +139,7 @@ def test_soft_pause_stops_at_pause_point_and_resumes():
     while "soft_paused" not in rec.states() and time.time() - t0 < 5:
         time.sleep(0.01)
     time.sleep(0.3)
-    assert [l for l in fake.received if l != "$$"] == lines[:101]
+    assert [l for l in fake.received if l not in ("$$", "$#")] == lines[:101]
     s.resume(["G90"])
     assert rec.done.wait(10)
     assert [l for l in fake.received if l not in ("$$", "G90")][-1] == "M5"
@@ -159,3 +159,59 @@ def test_abort_holds_then_resets():
     assert rec.states()[-1] == "aborted"
     assert len(fake.executed) < 500
     s.stop()
+
+
+def _offline_streamer():
+    rec = Recorder()
+    return GrblStreamer(lambda: None, rec), rec
+
+
+def test_job_finishes_when_last_ok_belongs_to_manual_command():
+    # Letzte Plot-Zeile bestätigt, während ein Konsolenbefehl noch unterwegs ist:
+    # das ok des Befehls muss den Plot beenden.
+    s, rec = _offline_streamer()
+    s.job, s.job_next, s.job_active = ["G1X1Y1"], 1, True
+    s.inflight.extend([Inflight("G1X1Y1", 7, "job", 0, 0.0), Inflight("G4P0", 5, "cmd", -1, 0.0)])
+    s._handle("ok")
+    assert rec.states() == []
+    s._handle("ok")
+    assert rec.states() == ["finished"]
+    assert not s.job_active
+
+
+def test_watchdog_resends_job_lines_queued_behind_lost_settings_query():
+    s, rec = _offline_streamer()
+    s.job, s.job_next, s.job_active = ["G1X1Y1"] * 10, 8, True
+    s.state, s.last_status_at, s.last_rx_at = "Idle", 100.0, time.monotonic()
+    s.inflight.extend([Inflight("$$", 3, "cmd", -1, 0.0), Inflight("G1X1Y1", 7, "job", 6, 0.0),
+                       Inflight("G1X1Y1", 7, "job", 7, 0.0)])
+    s._watchdog()
+    assert s.job_next == 6
+    assert ("repeats", 2) in rec.events
+    assert not s.inflight
+
+
+def test_status_prefers_work_position():
+    s, rec = _offline_streamer()
+    s._handle("<Idle,MPos:10.000,20.000,0.000,WPos:7.000,8.000,0.000>")
+    assert s.mpos == (7.0, 8.0)
+    s._handle("<Idle,MPos:10.000,20.000,0.000>")       # $10=1: nur MPos
+    assert s.mpos == (10.0, 20.0)
+
+
+@pytest.mark.parametrize("g54,warned", [((0.0, 0.0), False), ((5.0, 0.0), True)])
+def test_connect_warns_about_work_offset(g54, warned):
+    fake = FakeGrbl(block_time=0.0005, g54=g54)
+    rec = Recorder()
+    s = GrblStreamer(lambda: fake, rec, poll_interval=0.05)
+    s.start()
+    assert rec.connected.wait(5)
+    t0 = time.time()
+    while "$#" not in fake.received and time.time() - t0 < 2:
+        time.sleep(0.01)
+    time.sleep(0.2)
+    s.stop()
+    warns = [t for n, (k, t) in ((n, d) for n, d in rec.events if n == "log") if k == "warn"]
+    assert any("G54" in t and "G10 L2 P1 X0 Y0" in t for t in warns) == warned
+    # die Antwortzeilen landen nicht als unbekannte Antworten im Log
+    assert not any("[G55" in t for n, (k, t) in ((n, d) for n, d in rec.events if n == "log"))

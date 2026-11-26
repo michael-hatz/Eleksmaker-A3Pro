@@ -13,7 +13,7 @@ import time
 class FakeGrbl:
     RX = 127
 
-    def __init__(self, block_time=0.002, banner=True, corrupt=(), drop_ok=(), planner=18):
+    def __init__(self, block_time=0.002, banner=True, corrupt=(), drop_ok=(), planner=18, g54=(0.0, 0.0)):
         self.lock = threading.Lock()
         self.rx = bytearray()
         self.tx = bytearray()
@@ -26,6 +26,7 @@ class FakeGrbl:
         self.corrupt = set(corrupt)  # Nummern (0-basiert, nur G-Zeilen) -> einmal "error"
         self.drop_ok = set(drop_ok)  # Nummern -> "ok" geht verloren
         self.gcount = 0
+        self.g54 = g54
         self.state = "Idle"
         self.hold = False
         self.pos = [0.0, 0.0]
@@ -47,7 +48,7 @@ class FakeGrbl:
                 c = bytes([b])
                 if c == b"?":
                     st = "Hold" if self.hold else ("Run" if self.planner else "Idle")
-                    self.tx += f"<{st},MPos:{self.pos[0]:.3f},{self.pos[1]:.3f},0.000,WPos:0,0,0>\r\n".encode()
+                    self.tx += f"<{st},MPos:{self.pos[0]:.3f},{self.pos[1]:.3f},0.000,WPos:{self.pos[0]:.3f},{self.pos[1]:.3f},0.000>\r\n".encode()
                 elif c == b"!":
                     self.hold = True
                 elif c == b"~":
@@ -100,6 +101,12 @@ class FakeGrbl:
                 self.received.append(line)
                 if line == "$$":
                     self.tx += b"$110=500.000 (x max rate, mm/min)\r\n$120=100.000 (x accel, mm/sec^2)\r\nok\r\n"
+                    continue
+                if line == "$#":
+                    x, y = self.g54
+                    self.tx += (f"[G54:{x:.3f},{y:.3f},0.000]\r\n[G55:0.000,0.000,0.000]\r\n"
+                                "[G28:0.000,0.000,0.000]\r\n[G92:0.000,0.000,0.000]\r\n"
+                                "[TLO:0.000]\r\n[PRB:0.000,0.000,0.000]\r\nok\r\n").encode()
                     continue
                 k = self.gcount
                 self.gcount += 1
