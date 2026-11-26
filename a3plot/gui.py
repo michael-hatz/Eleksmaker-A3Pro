@@ -10,14 +10,14 @@ import time
 from datetime import datetime, timedelta
 
 import numpy as np
-from PyQt6.QtCore import QObject, QSettings, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, QSettings, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QFont, QKeySequence, QTextCursor
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                              QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout,
                              QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
                              QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit,
-                             QProgressBar, QPushButton, QScrollArea, QSlider, QSpinBox,
-                             QToolButton, QVBoxLayout, QWidget)
+                             QAbstractScrollArea, QAbstractSpinBox, QFrame, QProgressBar, QPushButton, QScrollArea,
+                             QSlider, QSpinBox, QTabWidget, QToolButton, QVBoxLayout, QWidget)
 
 from . import __version__
 from .grbl import GrblStreamer
@@ -29,7 +29,29 @@ from .sheetview import SheetView, polylines_path
 from .svgload import load_svg
 
 LOAD_SIMPLIFY_MM = 0.01
-HISTORY = os.path.join(os.path.expanduser("~"), ".local", "share", "a3plot", "history.csv")
+
+
+def history_path(platform=sys.platform, environ=os.environ):
+    """Ablageort der Plot-Historie: unter Windows %APPDATA%, sonst $XDG_DATA_HOME bzw. ~/.local/share."""
+    if platform == "win32":
+        base = environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Roaming")
+    else:
+        base = environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    return os.path.join(base, "a3plot", "history.csv")
+
+
+def port_choices(found, platform=sys.platform):
+    """Ports für die Auswahlliste. Unter Linux steht /dev/ttyUSB0 immer zur Wahl,
+    unter Windows nur die tatsächlich gefundenen COM-Ports."""
+    ports = set(found)
+    if platform != "win32":
+        ports.add(DEFAULT_PORT_LINUX)
+    return sorted(ports)
+
+
+DEFAULT_PORT_LINUX = "/dev/ttyUSB0"
+DEFAULT_PORT = "COM3" if sys.platform == "win32" else DEFAULT_PORT_LINUX
+HISTORY = history_path()
 
 
 class Bridge(QObject):
@@ -58,6 +80,39 @@ def ispin(lo, hi, val, suffix=""):
         s.setSuffix(suffix)
     s.setKeyboardTracking(False)
     return s
+
+
+class WheelGuard(QObject):
+    """Mausrad verstellt Felder nur, wenn sie den Fokus haben – sonst scrollt es die Seite
+    und ändert nicht versehentlich Servo-Werte oder Geschwindigkeiten."""
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Type.Wheel and not obj.hasFocus():
+            # Qt reicht ein per Filter abgefangenes Ereignis nicht an die Eltern weiter,
+            # darum selbst an den umgebenden Scrollbereich geben.
+            area = obj.parentWidget()
+            while area is not None and not isinstance(area, QAbstractScrollArea):
+                area = area.parentWidget()
+            if area is not None:
+                QApplication.sendEvent(area.viewport(), ev.clone())
+            return True
+        return False
+
+
+def guard_wheel(root, guard):
+    for w in root.findChildren((QAbstractSpinBox, QComboBox, QSlider)):
+        w.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        w.installEventFilter(guard)
+
+
+def scroll_page(widget):
+    """Reiterseite, die nur scrollt, wenn das Fenster wirklich zu klein ist."""
+    sa = QScrollArea()
+    sa.setWidget(widget)
+    sa.setWidgetResizable(True)
+    sa.setFrameShape(QFrame.Shape.NoFrame)
+    sa.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    return sa
 
 
 # ==========================================================================
@@ -101,6 +156,8 @@ class SettingsDialog(QDialog):
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         f.addRow(bb)
+        self.wheel_guard = WheelGuard(self)
+        guard_wheel(self, self.wheel_guard)
 
 
 # ==========================================================================
@@ -131,6 +188,8 @@ class MainWindow(QMainWindow):
         self.placement = Placement()
         self.drawing = None
         self.drawing_label = "Keine Datei geladen"   # Beschriftung der geladenen Zeichnung
+        self.load_gen = 0            # verwirft Ladevorgänge, die „Neuer Plot“ überholt hat
+        self.load_done = 0
         self.ordered = []            # pro Ebene: sortierte Pfade
         self.bounds = None           # Grenzen aller Ebenen (Dokument-mm, gedreht)
         self.job = None
@@ -160,16 +219,25 @@ class MainWindow(QMainWindow):
         self.view.placementCommitted.connect(self.schedule_build)
         self.setCentralWidget(self.view)
 
-        panel = QWidget()
-        lay = QVBoxLayout(panel)
-        lay.setContentsMargins(6, 6, 6, 6)
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
 
-        # --- Datei
-        g = QGroupBox("Zeichnung")
+        # ===== Reiter „Zeichnung“: Datei, Blatt und Position
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(6, 6, 6, 6)
+        g = QGroupBox("Datei")
         v = QVBoxLayout(g)
+        row = QHBoxLayout()
         b = QPushButton("SVG öffnen …")
         b.clicked.connect(self.open_svg)
-        v.addWidget(b)
+        row.addWidget(b, 1)
+        self.btn_close_drawing = QPushButton("Entfernen")
+        self.btn_close_drawing.setToolTip("Zeichnung schließen und Fortschrittsanzeige leeren "
+                                          "(wie Datei → Neuer Plot)")
+        self.btn_close_drawing.clicked.connect(self.new_plot)
+        row.addWidget(self.btn_close_drawing)
+        v.addLayout(row)
         self.file_label = QLabel("Keine Datei geladen")
         self.file_label.setWordWrap(True)
         v.addWidget(self.file_label)
@@ -230,10 +298,13 @@ class MainWindow(QMainWindow):
         f.addRow(self.place_warn)
         self.place_widgets = [self.paper, self.margin, self.px, self.py, self.pw, self.ph, self.pscale] + self.place_buttons
         lay.addWidget(g)
+        lay.addStretch(1)
+        self.tabs.addTab(scroll_page(page), "Zeichnung")
 
-        # --- Stift
-        g = QGroupBox("Stift")
-        f = QFormLayout(g)
+        # ===== Reiter „Stift“
+        page = QWidget()
+        f = QFormLayout(page)
+        f.setContentsMargins(10, 10, 10, 10)
         row = QHBoxLayout()
         self.speed_slider = QSlider(Qt.Orientation.Horizontal)
         self.speed_slider.setRange(20, 500)
@@ -278,11 +349,12 @@ class MainWindow(QMainWindow):
         f.addRow(row)
         self.pen_widgets = [self.speed, self.speed_slider, self.travel, self.pen_up, self.pen_down,
                             self.down_delay, self.up_delay]
-        lay.addWidget(g)
+        self.tabs.addTab(scroll_page(page), "Stift")
 
-        # --- Maschine
-        g = QGroupBox("Maschine")
-        v = QVBoxLayout(g)
+        # ===== Reiter „Maschine“
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(10, 10, 10, 10)
         row = QHBoxLayout()
         self.port = QComboBox()
         self.port.setEditable(True)
@@ -335,10 +407,20 @@ class MainWindow(QMainWindow):
             col.addWidget(bt)
         row.addLayout(col)
         v.addLayout(row)
+        # Stift hoch/runter auch hier: beim Anfahren der Blattecke braucht man beides
+        row = QHBoxLayout()
+        self.btn_pen_up2 = QPushButton("Stift hoch")
+        self.btn_pen_up2.clicked.connect(self.btn_pen_up.click)
+        self.btn_pen_down2 = QPushButton("Stift runter")
+        self.btn_pen_down2.clicked.connect(self.btn_pen_down.click)
+        row.addWidget(self.btn_pen_up2)
+        row.addWidget(self.btn_pen_down2)
+        v.addLayout(row)
         self.origin_label = QLabel()
         self.origin_label.setWordWrap(True)
         v.addWidget(self.origin_label)
-        lay.addWidget(g)
+        v.addStretch(1)
+        self.tabs.addTab(scroll_page(page), "Maschine")
 
         # --- Plot (eigenes, immer sichtbares Dock)
         g = QWidget()
@@ -395,16 +477,18 @@ class MainWindow(QMainWindow):
         self.last_label = QLabel()
         self.last_label.setWordWrap(True)
         v.addWidget(self.last_label)
+        v.addStretch(1)
         plot_widget = g
-        lay.addStretch(1)
 
-        sa = QScrollArea()
-        sa.setWidget(panel)
-        sa.setWidgetResizable(True)
-        sa.setMinimumWidth(400)
+        self.tabs.setMinimumWidth(400)
+        self.wheel_guard = WheelGuard(self)
+        guard_wheel(self.tabs, self.wheel_guard)
+        guard_wheel(plot_widget, self.wheel_guard)
+        # rechte Spalte über die volle Höhe, das Protokoll nur unter der Blattansicht
+        self.setCorner(Qt.Corner.BottomRightCorner, Qt.DockWidgetArea.RightDockWidgetArea)
         dock = QDockWidget("Steuerung")
         dock.setObjectName("panel")
-        dock.setWidget(sa)
+        dock.setWidget(self.tabs)
         dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         pdock = QDockWidget("Plot")
@@ -439,12 +523,16 @@ class MainWindow(QMainWindow):
 
         # --- Menü
         m = self.menuBar().addMenu("&Datei")
+        self.act_new = QAction("Neuer Plot", self, shortcut=QKeySequence.StandardKey.New)
+        self.act_new.setStatusTip("Zeichnung schließen und Fortschrittsanzeige leeren")
+        self.act_new.triggered.connect(self.new_plot)
+        m.addAction(self.act_new)
         a = QAction("SVG öffnen …", self, shortcut=QKeySequence.StandardKey.Open)
         a.triggered.connect(self.open_svg)
         m.addAction(a)
-        a = QAction("G-Code speichern …", self)
-        a.triggered.connect(self.save_gcode)
-        m.addAction(a)
+        self.act_save = QAction("G-Code speichern …", self)
+        self.act_save.triggered.connect(self.save_gcode)
+        m.addAction(self.act_save)
         m.addSeparator()
         a = QAction("Beenden", self, shortcut=QKeySequence.StandardKey.Quit)
         a.triggered.connect(self.close)
@@ -481,7 +569,10 @@ class MainWindow(QMainWindow):
     def load_file(self, fn):
         self.settings.setValue("last_dir", os.path.dirname(fn))
         self.file_label.setText(f"Lade {os.path.basename(fn)} …")
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        if not self.loading:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self.load_gen += 1
+        gen = self.load_gen
 
         def work():
             try:
@@ -490,15 +581,23 @@ class MainWindow(QMainWindow):
                 for layer in d.layers:
                     ps = [simplify(p, LOAD_SIMPLIFY_MM) for p in layer.paths]
                     ordered.append(order_paths(ps, start=(0.0, d.height_mm)))
-                self.bridge.loaded.emit((fn, d, ordered))
+                self.bridge.loaded.emit((fn, d, ordered, gen))
             except Exception as e:
-                self.bridge.loaded.emit((fn, e, None))
+                self.bridge.loaded.emit((fn, e, None, gen))
 
         threading.Thread(target=work, daemon=True).start()
 
+    @property
+    def loading(self):
+        return self.load_gen != self.load_done
+
     def on_loaded(self, res):
-        QApplication.restoreOverrideCursor()
-        fn, d, ordered = res
+        fn, d, ordered, *gen = res
+        if gen and gen[0] != self.load_gen:
+            return       # von einem späteren Laden oder „Neuer Plot“ überholt
+        if self.loading:
+            self.load_done = self.load_gen
+            QApplication.restoreOverrideCursor()
         if self.plot:     # Plot wurde gestartet, während die Datei noch geladen hat
             self.file_label.setText(self.drawing_label)
             self.statusBar().showMessage(f"{os.path.basename(fn)} nicht geöffnet: es läuft ein Plot.", 8000)
@@ -514,6 +613,7 @@ class MainWindow(QMainWindow):
             return
         self.drawing, self.ordered = d, ordered
         self.placement.rotation = 0
+        self.clear_plot_display()
         self.layers.blockSignals(True)
         self.layers.clear()
         for layer in d.layers:
@@ -533,6 +633,44 @@ class MainWindow(QMainWindow):
         self.update_drawing_geometry()
         self.fit_to_margin()
         self.view.fit()
+        self.update_buttons()
+
+    def new_plot(self):
+        """Zeichnung schließen – Blatt, Stift und Maschinen-Einstellungen bleiben."""
+        if self.plot:
+            QMessageBox.information(self, "Neuer Plot", "Während eines Plots nicht möglich.")
+            return
+        if self.drawing and not self.ask("Zeichnung schließen? Position und Größe gehen verloren."):
+            return
+        if self.loading:      # ein noch laufendes Laden nicht mehr anzeigen
+            self.load_done = self.load_gen
+            QApplication.restoreOverrideCursor()
+        self.load_gen += 1
+        self.load_done = self.load_gen
+        self.rebuild_timer.stop()
+        self.job_gen += 1     # laufenden Build verwerfen
+        self.job, self.job_dirty = None, True
+        self.drawing, self.ordered, self.bounds = None, [], None
+        self.layers.blockSignals(True)
+        self.layers.clear()
+        self.layers.blockSignals(False)
+        self.drawing_label = "Keine Datei geladen"
+        self.file_label.setText(self.drawing_label)
+        self.setWindowTitle("A3 Plot")
+        self.view.set_drawing([], 1.0, 1.0)
+        self.clear_plot_display()
+        self.estimate_label.setText("–")
+        self.check_placement()
+        self.update_buttons()
+
+    def clear_plot_display(self):
+        """Fortschritt und Zahlen des letzten Plots aus der Anzeige nehmen."""
+        self.view.clear_progress()
+        self.view.set_travel(None)
+        self.progress.setValue(0)
+        for lab in (self.l_total, self.l_elapsed, self.l_remaining, self.l_eta, self.l_lines):
+            lab.setText("–")
+        self.last_label.setText("")
 
     def active_layers(self):
         return [i for i in range(self.layers.count())
@@ -773,7 +911,7 @@ class MainWindow(QMainWindow):
         base = os.path.splitext(self.drawing.source)[0] + ".gcode"
         fn, _ = QFileDialog.getSaveFileName(self, "G-Code speichern", base, "G-Code (*.gcode *.nc)")
         if fn:
-            with open(fn, "w") as f:
+            with open(fn, "w", encoding="utf-8") as f:
                 f.write("\n".join(job.lines) + "\n")
             self.statusBar().showMessage(f"Gespeichert: {fn}", 5000)
 
@@ -827,14 +965,14 @@ class MainWindow(QMainWindow):
 
     # ========================================================= Verbindung
     def refresh_ports(self):
-        cur = self.port.currentText() or self.settings.value("port", "/dev/ttyUSB0")
+        cur = self.port.currentText() or self.settings.value("port", DEFAULT_PORT)
         self.port.clear()
         try:
             from serial.tools import list_ports
             ports = [p.device for p in list_ports.comports()]
         except Exception:
             ports = []
-        for p in sorted(set(ports) | {"/dev/ttyUSB0"}):
+        for p in port_choices(ports):
             self.port.addItem(p)
         self.port.setCurrentText(cur)
 
@@ -1157,7 +1295,7 @@ class MainWindow(QMainWindow):
         try:
             os.makedirs(os.path.dirname(HISTORY), exist_ok=True)
             new = not os.path.exists(HISTORY)
-            with open(HISTORY, "a", newline="") as f:
+            with open(HISTORY, "a", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
                 if new:
                     w.writerow(["start", "datei", "ergebnis", "dauer_s", "aktiv_s", "schaetzung_s",
@@ -1224,7 +1362,8 @@ class MainWindow(QMainWindow):
         plotting = self.plot is not None
         st = self.plot["state"] if plotting else None
         idle_manual = c and (not plotting or st == "soft_paused")
-        for w in self.jog_buttons + [self.btn_pen_up, self.btn_pen_down, self.btn_set_origin,
+        for w in self.jog_buttons + [self.btn_pen_up, self.btn_pen_down, self.btn_pen_up2,
+                                     self.btn_pen_down2, self.btn_set_origin,
                                      self.btn_goto_origin, self.btn_goto_corner2, self.btn_set_corner2,
                                      self.btn_unlock]:
             w.setEnabled(idle_manual)
@@ -1237,6 +1376,9 @@ class MainWindow(QMainWindow):
         for w in self.place_widgets + self.pen_widgets:
             w.setEnabled(not plotting)
         self.layers.setEnabled(not plotting)
+        self.act_new.setEnabled(not plotting)
+        self.btn_close_drawing.setEnabled(not plotting and self.drawing is not None)
+        self.act_save.setEnabled(self.drawing is not None)
 
     # ========================================================== Schließen
     def closeEvent(self, e):
