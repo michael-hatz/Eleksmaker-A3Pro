@@ -1,0 +1,12 @@
+diff --git a/spindle_control.c b/spindle_control.c
+index cd14f94..2d48b45 100644
+--- a/spindle_control.c
++++ b/spindle_control.c
+@@ -120,5 +120,5 @@ void spindle_run(uint8_t direction, float rpm)
+     #endif  
+   }
+ }
+-spindle_set_state(uint8_t state, float rpm){
++void spindle_set_state(uint8_t state, float rpm){
+ }
+\ No newline at end of file

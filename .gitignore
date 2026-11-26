@@ -1,0 +1,5 @@
+backup/
+firmware/grbl-servo/
+firmware/build/
+__pycache__/
+*.pyc
