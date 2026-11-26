@@ -98,6 +98,9 @@ def test_console_during_plot(win, state, allowed):
     win.console.setText("G0X0Y0")
     win.send_console()
     assert (win.streamer.commands == ["G0X0Y0"]) == allowed
+    if not allowed:
+        assert "Während des Plots gesperrt" in win.log.toPlainText()
+        assert win.console.text() == "G0X0Y0"       # Eingabe bleibt stehen
     win.console.setText("!")
     win.send_console()
     assert win.streamer.realtimes == [b"!"]          # Echtzeitbefehle immer
@@ -110,8 +113,29 @@ def test_loading_during_plot_keeps_drawing(win, tmp_path):
     svg.write_bytes(b'<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="10mm">'
                     b'<path d="M0 0 L10 10"/></svg>')
     d = load_svg(str(svg))
+    label = win.file_label.text()
+    assert "a.svg" in label
+    win.file_label.setText("Lade b.svg …")
     win.on_loaded((str(svg), d, [list(l.paths) for l in d.layers]))
     assert win.drawing is before
+    assert win.file_label.text() == label
+    assert "b.svg nicht geöffnet" in win.statusBar().currentMessage()
+
+
+def test_failed_load_keeps_label_of_loaded_drawing(win, monkeypatch):
+    label = win.file_label.text()
+    monkeypatch.setattr(gui.QMessageBox, "critical", lambda *a: None)
+    win.on_loaded(("kaputt.svg", ValueError("kaputt"), None))
+    assert win.file_label.text() == label and win.drawing is not None
+
+
+def test_pause_point_reached_during_hold_stays_holding(win):
+    _plotting(win, "holding")
+    win.on_job_state("soft_paused")
+    assert win.plot["state"] == "holding"
+    assert win.manual_blocked()
+    win.resume_plot()
+    assert win.streamer.resumes == [win.resume_prefix()]   # Stift hoch nach dem Strich
 
 
 def test_close_survives_disconnect_while_waiting(win):
@@ -133,6 +157,30 @@ def test_close_survives_disconnect_while_waiting(win):
     assert s.stopped
 
 
+def test_close_does_not_wait_for_vanished_streamer(win):
+    import time
+    s = FakeStreamer()
+    s.aborting = {"phase": "hold"}       # Worker beendet, aborting bleibt stehen
+    win.streamer = s
+    _plotting(win, "running")
+    win.ask = lambda t: True
+    orig = gui.QApplication.processEvents
+
+    def disconnect_once():
+        win.streamer = None
+        orig()
+
+    gui.QApplication.processEvents = staticmethod(disconnect_once)
+    try:
+        t0 = time.monotonic()
+        win.close()
+        took = time.monotonic() - t0
+    finally:
+        gui.QApplication.processEvents = staticmethod(orig)
+    assert s.stopped
+    assert took < 1.0
+
+
 def test_settings_change_resets_angle(win, monkeypatch):
     win.setup.sheet_angle = 1.5
 
@@ -152,9 +200,17 @@ def test_settings_change_resets_angle(win, monkeypatch):
     win.setup.origin_corner = "bl"
     win.edit_settings()
     assert win.setup.sheet_angle == 0.0
+    assert "Papierecke = hier" in win.log.toPlainText()
+    # auch ohne Drehung muss gewarnt werden: die Blattecke stammt von der alten Ecke
+    win.log.clear()
+    win.setup.origin_corner = "bl"
+    win.edit_settings()
+    assert "Papierecke = hier" in win.log.toPlainText()
+    win.log.clear()
     win.setup.sheet_angle = 1.5    # gleiche Ecke/Achsen erneut bestätigen: bleibt
     win.edit_settings()
     assert win.setup.sheet_angle == 1.5
+    assert "Papierecke" not in win.log.toPlainText()
 
 
 def test_handles_sit_on_drawing_corners_at_large_scale(app):

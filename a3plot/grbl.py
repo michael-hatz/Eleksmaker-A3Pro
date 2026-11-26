@@ -35,6 +35,10 @@ RX_BUFFER = 127
 STATUS_RE = re.compile(r"<(\w+)(?:,MPos:([-\d.]+),([-\d.]+),([-\d.]+))?(?:,WPos:([-\d.]+),([-\d.]+),([-\d.]+))?")
 
 
+class QuietCmd(str):
+    """Befehl, den das Programm selbst schickt (Einstellungen/Versätze lesen) – Antwort nicht loggen."""
+
+
 @dataclass
 class Inflight:
     text: str
@@ -193,8 +197,8 @@ class GrblStreamer:
         if not banner:
             self._log("info", "Kein Banner – Controller wurde nicht neu gestartet, alter Zustand gilt weiter.")
         self._emit("connected", (self.version or "Grbl ?", banner))
-        self.command("$$")
-        self.command("$#")
+        self.command(QuietCmd("$$"))
+        self.command(QuietCmd("$#"))
         return True
 
     def _wait_ok(self, timeout):
@@ -346,7 +350,7 @@ class GrblStreamer:
         if e.src == "cmd":
             if err:
                 self._log("error", f"{e.text} -> {err}")
-            elif e.text not in ("$$", "$#"):
+            elif not isinstance(e.text, QuietCmd):
                 self._log("rx", f"{e.text} -> ok")
             self._check_finished()
             return
@@ -378,6 +382,8 @@ class GrblStreamer:
             self._emit("job_state", "finished")
 
     def _offset(self, line):
+        if not (self.inflight and isinstance(self.inflight[0].text, QuietCmd)):
+            self._log("rx", line)       # selbst getipptes $#
         m = re.match(r"\[(G54|G92):([-\d.]+),([-\d.]+)", line)
         if m and (abs(float(m.group(2))) > 1e-6 or abs(float(m.group(3))) > 1e-6):
             self._log("warn", f"{line}: Koordinaten-Versatz {m.group(1)} ist nicht null. Positionen "
@@ -431,7 +437,7 @@ class GrblStreamer:
                 and now - oldest.sent_at > self.idle_timeout
                 and now - self.last_rx_at < 2 * self.poll_interval + 1.0  # GRBL lebt (Status kommt)
                 ):
-            lost = [e for e in self.inflight if e.text not in ("$$", "$#")]
+            lost = [e for e in self.inflight if not isinstance(e.text, QuietCmd)]
             self.inflight.clear()
             if not lost:
                 return

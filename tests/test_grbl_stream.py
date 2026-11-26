@@ -210,8 +210,17 @@ def test_connect_warns_about_work_offset(g54, warned):
     while "$#" not in fake.received and time.time() - t0 < 2:
         time.sleep(0.01)
     time.sleep(0.2)
+    logs = [t for n, (k, t) in ((n, d) for n, d in rec.events if n == "log")]
+    # die automatische Abfrage beim Verbinden erscheint nicht im Log …
+    assert not any("[G55" in t for t in logs)
+    # … ein selbst getipptes $# dagegen vollständig
+    s.command("$#")
+    t0 = time.time()
+    while not any("$# -> ok" in t for n, (k, t) in ((n, d) for n, d in rec.events if n == "log")) \
+            and time.time() - t0 < 2:
+        time.sleep(0.01)
     s.stop()
+    logs = [t for n, (k, t) in ((n, d) for n, d in rec.events if n == "log")]
+    assert "[G55:0.000,0.000,0.000]" in logs and "$# -> ok" in logs
     warns = [t for n, (k, t) in ((n, d) for n, d in rec.events if n == "log") if k == "warn"]
     assert any("G54" in t and "G10 L2 P1 X0 Y0" in t for t in warns) == warned
-    # die Antwortzeilen landen nicht als unbekannte Antworten im Log
-    assert not any("[G55" in t for n, (k, t) in ((n, d) for n, d in rec.events if n == "log"))

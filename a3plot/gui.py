@@ -130,7 +130,7 @@ class MainWindow(QMainWindow):
         self.park = st.value("plot/park", "true") == "true"
         self.placement = Placement()
         self.drawing = None
-        self.label_before_load = "Keine Datei geladen"
+        self.drawing_label = "Keine Datei geladen"   # Beschriftung der geladenen Zeichnung
         self.ordered = []            # pro Ebene: sortierte Pfade
         self.bounds = None           # Grenzen aller Ebenen (Dokument-mm, gedreht)
         self.job = None
@@ -480,7 +480,6 @@ class MainWindow(QMainWindow):
 
     def load_file(self, fn):
         self.settings.setValue("last_dir", os.path.dirname(fn))
-        self.label_before_load = self.file_label.text()
         self.file_label.setText(f"Lade {os.path.basename(fn)} …")
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
 
@@ -501,15 +500,15 @@ class MainWindow(QMainWindow):
         QApplication.restoreOverrideCursor()
         fn, d, ordered = res
         if self.plot:     # Plot wurde gestartet, während die Datei noch geladen hat
-            self.file_label.setText(self.label_before_load)
+            self.file_label.setText(self.drawing_label)
             self.statusBar().showMessage(f"{os.path.basename(fn)} nicht geöffnet: es läuft ein Plot.", 8000)
             return
         if isinstance(d, Exception):
-            self.file_label.setText("Keine Datei geladen")
+            self.file_label.setText(self.drawing_label)   # bisherige Zeichnung bleibt geladen
             QMessageBox.critical(self, "SVG", f"Datei kann nicht gelesen werden:\n{d}")
             return
         if not d.layers:
-            self.file_label.setText(os.path.basename(fn))
+            self.file_label.setText(self.drawing_label)
             QMessageBox.warning(self, "SVG", "Die Datei enthält keine zeichenbaren Linien.\n"
                                 + "\n".join(d.warnings))
             return
@@ -528,6 +527,7 @@ class MainWindow(QMainWindow):
                 f"{sum(len(l.paths) for l in d.layers)} Pfade · {npts} Punkte")
         if d.warnings:
             text += "<br><span style='color:#b5261e'>" + "<br>".join(d.warnings) + "</span>"
+        self.drawing_label = text
         self.file_label.setText(text)
         self.setWindowTitle(f"A3 Plot – {os.path.basename(fn)}")
         self.update_drawing_geometry()
@@ -790,10 +790,11 @@ class MainWindow(QMainWindow):
         self.setup.x_right = dlg.xdir.currentIndex() == 0
         self.setup.y_up = dlg.ydir.currentIndex() == 0
         if old != (self.setup.origin_corner, self.setup.x_right, self.setup.y_up):
-            if self.setup.sheet_angle:
-                self.setup.sheet_angle = 0.0
-                self.log_line("warn", "Nullpunkt-Ecke oder Achsrichtung geändert: Drehung zurückgesetzt. "
-                                      "Bitte Papierecke und 2. Ecke neu setzen.")
+            # die gespeicherte Blattecke wurde an der alten Ecke gemessen
+            self.setup.sheet_angle = 0.0
+            self.log_line("warn", "Nullpunkt-Ecke oder Achsrichtung geändert: Drehung zurückgesetzt. "
+                                  "Bitte „Papierecke = hier“ (und ggf. 2. Ecke) neu setzen.")
+            self.statusBar().showMessage("Bitte Papierecke neu setzen.", 10000)
         self.mode = dlg.mode.currentData()
         self.budget = dlg.budget.value()
         self.park = dlg.park.isChecked()
@@ -931,6 +932,8 @@ class MainWindow(QMainWindow):
         if state in ("soft_paused", "holding"):
             if state == "soft_paused":
                 p["soft_pause"] = True    # Stift darf bewegt worden sein -> beim Weiter anheben
+                if p["state"] == "holding":
+                    state = "holding"     # Pausenpunkt im Hold erreicht: Maschine steht noch im Hold
             if p["paused_at"] is None:
                 p["paused_at"] = now
             p["state"] = state
@@ -1246,7 +1249,8 @@ class MainWindow(QMainWindow):
                 # anhalten und Reset abwarten, damit der Plotter sicher steht
                 s.abort()
                 t = time.monotonic()
-                while time.monotonic() - t < 0.3 or (s.aborting and time.monotonic() - t < 5):
+                while time.monotonic() - t < 0.3 or (s.aborting and self.streamer is s
+                                                     and time.monotonic() - t < 5):
                     QApplication.processEvents()
                     time.sleep(0.02)
             s.stop()
